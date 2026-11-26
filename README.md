@@ -59,27 +59,30 @@ the package.
 - Mouse interaction needs fullscreen mode (`tuiMode`, Pi's default). Every mouse
   action has a slash-command equivalent.
 
-## Footer baseline
+## Machine setup
 
-Both packages stay out of Pi's footer: that line carries the cwd (plus git
-branch and session name) and Pi's own session stats
-(`↑in ↓out RcacheRead CHhit% $cost ctx%/window (auto)`), and nothing pinned by
-extensions. `scripts/footer-baseline.sh` makes another machine match:
+One script converges a machine to this setup — the right extensions installed,
+the noisy ones gone, and nothing pinned into Pi's footer:
 
 ```bash
-scripts/footer-baseline.sh                       # report what differs
-scripts/footer-baseline.sh --apply               # settings + session cleanup
-scripts/footer-baseline.sh --agent-dir DIR       # non-default PI_CONFIG_DIR
-ssh host 'bash -s -- --apply' < scripts/footer-baseline.sh
+scripts/setup-pi.sh                              # report only, changes nothing
+scripts/setup-pi.sh --apply                      # install/remove/configure
+scripts/setup-pi.sh --apply --purge-context-mode-data
+scripts/setup-pi.sh --agent-dir DIR              # non-default PI_CONFIG_DIR
+ssh host 'bash -s -- --apply' < scripts/setup-pi.sh
 ```
 
-It removes `pi-thinking-steps`/`pi-context-tree` from the package list (the
-former paints `in … tok/s · out … tok/s`), sets
-`mcp-adapter.json → settings.mcpFooterStatus: "off"` (the `🔌 MCP: 2 servers…`
-segment), strips legacy `thinking-steps.*` session entries, and warns when
-tool-tree is older than 0.1.1 (which echoed `tool-tree on · turn · preview 6`
-into the footer). Restart Pi afterwards — extensions and the MCP footer setting
-are read at startup.
+| | |
+|---|---|
+| installs | `pi-web-access`, `pi-mcp-adapter`, this clone's `tool-tree` + `thinking-fold` |
+| removes | `context-mode` (+ its orphan `server.bundle.mjs` daemons, `ctx_*` tools), `pi-thinking-steps` (+ the legacy `thinking-steps.*` session entries behind the `in … tok/s · out … tok/s` line), `pi-context-tree` |
+| configures | `mcp-adapter.json` → `settings.mcpFooterStatus: "off"` (no `🔌 MCP: 2 servers…` segment) |
+| keeps | everything else: MCP servers, other extensions, session history (`.jsonl.bak` next to each rewritten session) |
+
+It is idempotent, reports before it acts, and works from a non-interactive shell
+(ssh): it finds `node` through Pi's own install dir and stays bash-3.2 safe.
+Restart Pi afterwards — extensions, their tools and the MCP footer setting load
+at startup.
 
 ## Layout
 
@@ -88,7 +91,7 @@ pi-extensions/
 ├── package.json            private workspace root, loads both extensions
 ├── tool-tree/              pi-tool-tree
 ├── thinking-fold/          pi-thinking-fold-deepseek
-├── scripts/                footer-baseline.sh (machine parity for Pi's footer)
+├── scripts/                setup-pi.sh (machine setup: extensions + footer)
 ├── docs/tool-tree-plan.md  design notes and measured internals for tool-tree
 └── .github/workflows/      tests and tag-driven npm publish
 ```

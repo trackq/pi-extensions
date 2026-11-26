@@ -57,7 +57,7 @@ Ctrl+T should also work on restored sessions (previous messages expand).
   `customType: "thinking-steps.rate-line"` entry from the retired
   `pi-thinking-steps` package. Restart Pi (a process started with that package
   still loaded renders it), then clean the files with
-  `scripts/strip-legacy-entries.mjs` (see README).
+  `../scripts/setup-pi.sh --apply` (see README).
 - `Warning: pi crashed …` banner (any exception in the patched `render`/
   `updateContent` must be caught and fall back to native rendering).
 - Blank assistant message or missing answer text.
@@ -72,7 +72,7 @@ Ctrl+T should also work on restored sessions (previous messages expand).
 | `model-behaviors.ts` / `.json` | api/provider/model regex rules → `trace` or `summary`; unmatched defaults to `trace` |
 | `config.ts` | Self-contained settings in `~/.pi/agent/99extensions.json` → `thinking-fold` (upstream-compatible schema) |
 | `test/render-regressions.mjs` | The harness above |
-| `scripts/strip-legacy-entries.mjs` | Removes leftover `thinking-steps.*` custom entries from session files (dry run by default) |
+| `../scripts/setup-pi.sh` | Repo-wide setup: installs/removes extensions, configures the footer, strips leftover `thinking-steps.*` entries (report by default) |
 
 Key renderer invariants:
 

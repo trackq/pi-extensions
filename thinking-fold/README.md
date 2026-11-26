@@ -149,11 +149,11 @@ installed is still running: restart Pi, and check `pi list` /
 
 To drop the leftover entries from the session files:
 
+The repo's setup script removes the package and the leftover entries in one go:
+
 ```bash
-node scripts/strip-legacy-entries.mjs                     # dry run, prints what it would remove
-node scripts/strip-legacy-entries.mjs --apply             # rewrite, keeps <session>.jsonl.bak
-node scripts/strip-legacy-entries.mjs --apply --no-backup
-node scripts/strip-legacy-entries.mjs --dir <sessions dir>
+../scripts/setup-pi.sh                # report: counts the legacy entries
+../scripts/setup-pi.sh --apply        # uninstall + strip, keeps <session>.jsonl.bak
 ```
 
 It only removes lines whose entry type is `custom` and whose `customType`
