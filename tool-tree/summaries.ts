@@ -53,6 +53,22 @@ function clamp(value: string, max = MAX_SUBJECT_WIDTH): string {
   return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : chars.join("");
 }
 
+/** Keep the tail of a path, which is the part that identifies the file. */
+function clampPath(value: string, max = 60): string {
+  const chars = Array.from(value.replace(/\s+/g, " ").trim());
+  return chars.length > max ? `…${chars.slice(chars.length - max + 1).join("")}` : chars.join("");
+}
+
+function countLines(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  return value.replace(/\n+$/, "").split("\n").length;
+}
+
+function matchesLabel(count: number | undefined, singular: string, plural: string): string | undefined {
+  if (count === undefined) return undefined;
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
 function quoteList(values: string[], max = 2): string {
   const quoted = values.slice(0, max).map((value) => `"${clamp(value, 40)}"`);
   const rest = values.length - quoted.length;
@@ -162,7 +178,8 @@ export function summarizeToolCall(input: SummaryInput): ToolSummary {
       };
     }
     case "ctx_execute":
-    case "bash": {
+    case "bash":
+    case "powershell": {
       const command =
         textOf(record.command) ??
         textOf(record.cmd) ??
@@ -180,6 +197,114 @@ export function summarizeToolCall(input: SummaryInput): ToolSummary {
           failed ? "failed" : code !== undefined ? `exit ${code}` : undefined,
           linesLabel(lines),
         ]
+          .filter(Boolean)
+          .join(" · ") || undefined,
+        details,
+        output: resultText,
+      };
+    }
+    case "read": {
+      const path = textOf(record.path) ?? textOf(record.file);
+      const offset = typeof record.offset === "number" ? record.offset : undefined;
+      const limit = typeof record.limit === "number" ? record.limit : undefined;
+      const range =
+        offset !== undefined || limit !== undefined
+          ? `${offset ?? 1}${limit !== undefined ? `-${(offset ?? 1) + limit - 1}` : "+"}`
+          : undefined;
+      addDetails([
+        ["file", path],
+        ["range", range],
+      ]);
+      return {
+        subject: path ? clampPath(path) : "read",
+        meta: [failed ? "failed" : undefined, linesLabel(lines)].filter(Boolean).join(" · ") || undefined,
+        details,
+        output: resultText,
+      };
+    }
+    case "write": {
+      const path = textOf(record.path) ?? textOf(record.file);
+      const content = typeof record.content === "string" ? record.content : undefined;
+      const written = countLines(content);
+      addDetails([
+        ["file", path],
+        ["content", content],
+      ]);
+      return {
+        subject: path ? clampPath(path) : "write",
+        meta:
+          [failed ? "failed" : undefined, written !== undefined ? `+${written} lines` : linesLabel(lines)]
+            .filter(Boolean)
+            .join(" · ") || undefined,
+        details,
+        output: resultText,
+      };
+    }
+    case "edit": {
+      const path = textOf(record.path) ?? textOf(record.file);
+      const edits = Array.isArray(record.edits) ? record.edits : [];
+      let added = 0;
+      let removed = 0;
+      for (const entry of edits) {
+        const edit = asRecord(entry);
+        if (!edit) continue;
+        added += countLines(typeof edit.newText === "string" ? edit.newText : undefined) ?? 0;
+        removed += countLines(typeof edit.oldText === "string" ? edit.oldText : undefined) ?? 0;
+      }
+      addDetails([
+        ["file", path],
+        ["blocks", edits.length > 0 ? `${edits.length} edit${edits.length === 1 ? "" : "s"}` : undefined],
+      ]);
+      return {
+        subject: path ? clampPath(path) : "edit",
+        meta: failed ? "failed" : `+${added} −${removed}`,
+        details,
+        output: resultText,
+      };
+    }
+    case "grep": {
+      const pattern = textOf(record.pattern);
+      const noMatches = /no matches found/i.test(resultText ?? "");
+      addDetails([
+        ["pattern", pattern],
+        ["path", textOf(record.path)],
+        ["glob", textOf(record.glob)],
+      ]);
+      return {
+        subject: pattern ? `"${clamp(pattern, 48)}"` : "grep",
+        meta: [
+          failed ? "failed" : undefined,
+          noMatches ? "no matches" : matchesLabel(lines, "match", "matches"),
+        ]
+          .filter(Boolean)
+          .join(" · ") || undefined,
+        details,
+        output: resultText,
+      };
+    }
+    case "find": {
+      const pattern = textOf(record.pattern);
+      const none = /no files found/i.test(resultText ?? "");
+      addDetails([
+        ["pattern", pattern],
+        ["path", textOf(record.path)],
+      ]);
+      return {
+        subject: pattern ? `"${clamp(pattern, 48)}"` : "find",
+        meta:
+          [failed ? "failed" : undefined, none ? "no files" : matchesLabel(lines, "file", "files")]
+            .filter(Boolean)
+            .join(" · ") || undefined,
+        details,
+        output: resultText,
+      };
+    }
+    case "ls": {
+      const path = textOf(record.path);
+      addDetails([["path", path]]);
+      return {
+        subject: path ? clampPath(path) : ".",
+        meta: [failed ? "failed" : undefined, matchesLabel(lines, "entry", "entries")]
           .filter(Boolean)
           .join(" · ") || undefined,
         details,

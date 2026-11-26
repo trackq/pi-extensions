@@ -59,6 +59,28 @@ the package.
 - Mouse interaction needs fullscreen mode (`tuiMode`, Pi's default). Every mouse
   action has a slash-command equivalent.
 
+## Footer baseline
+
+Both packages stay out of Pi's footer: that line carries the cwd (plus git
+branch and session name) and Pi's own session stats
+(`↑in ↓out RcacheRead CHhit% $cost ctx%/window (auto)`), and nothing pinned by
+extensions. `scripts/footer-baseline.sh` makes another machine match:
+
+```bash
+scripts/footer-baseline.sh                       # report what differs
+scripts/footer-baseline.sh --apply               # settings + session cleanup
+scripts/footer-baseline.sh --agent-dir DIR       # non-default PI_CONFIG_DIR
+ssh host 'bash -s -- --apply' < scripts/footer-baseline.sh
+```
+
+It removes `pi-thinking-steps`/`pi-context-tree` from the package list (the
+former paints `in … tok/s · out … tok/s`), sets
+`mcp-adapter.json → settings.mcpFooterStatus: "off"` (the `🔌 MCP: 2 servers…`
+segment), strips legacy `thinking-steps.*` session entries, and warns when
+tool-tree is older than 0.1.1 (which echoed `tool-tree on · turn · preview 6`
+into the footer). Restart Pi afterwards — extensions and the MCP footer setting
+are read at startup.
+
 ## Layout
 
 ```text
@@ -66,6 +88,7 @@ pi-extensions/
 ├── package.json            private workspace root, loads both extensions
 ├── tool-tree/              pi-tool-tree
 ├── thinking-fold/          pi-thinking-fold-deepseek
+├── scripts/                footer-baseline.sh (machine parity for Pi's footer)
 ├── docs/tool-tree-plan.md  design notes and measured internals for tool-tree
 └── .github/workflows/      tests and tag-driven npm publish
 ```

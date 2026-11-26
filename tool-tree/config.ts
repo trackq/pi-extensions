@@ -104,7 +104,18 @@ export function saveToolTreeConfig(config: ToolTreeConfig, path = getToolTreeCon
 }
 
 const AUTO_TOOL_PREFIXES = ["ctx_", "mcp__"];
-const AUTO_TOOL_NAMES = ["bash", "web_search", "fetch_content"];
+const AUTO_TOOL_NAMES = [
+  "bash",
+  "powershell",
+  "web_search",
+  "fetch_content",
+  "read",
+  "write",
+  "edit",
+  "grep",
+  "find",
+  "ls",
+];
 
 /** Which tool calls this package draws itself. Everything else keeps Pi's renderer. */
 export function shouldHandleTool(toolName: string, config: ToolTreeConfig): boolean {

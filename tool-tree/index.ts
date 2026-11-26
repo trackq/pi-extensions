@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import {
   getToolTreeConfigPath,
   loadToolTreeConfig,
@@ -18,6 +18,25 @@ import { ToolTreeRegistry } from "./registry.ts";
 
 const RENDER_BRIDGE_WIDGET = "tool-tree-render-bridge";
 const SPINNER_INTERVAL_MS = 200;
+/**
+ * One registry per Pi process, shared across extension reloads. Components Pi
+ * already rendered keep calling into it (their `updateDisplay` closures are not
+ * rebuilt by `/reload`), so a fresh instance must adopt the live state instead
+ * of restoring a second copy of the session.
+ */
+const REGISTRY_SYMBOL = Symbol.for("pi-tool-tree/registry");
+
+function sharedRegistry(config: ToolTreeConfig): ToolTreeRegistry {
+  const bag = globalThis as unknown as Record<PropertyKey, unknown>;
+  const existing = bag[REGISTRY_SYMBOL];
+  if (existing instanceof ToolTreeRegistry) {
+    existing.setConfig(config);
+    return existing;
+  }
+  const created = new ToolTreeRegistry(config);
+  bag[REGISTRY_SYMBOL] = created;
+  return created;
+}
 
 function configSummary(config: ToolTreeConfig): string {
   return [
@@ -30,51 +49,54 @@ function configSummary(config: ToolTreeConfig): string {
   ].join(" · ");
 }
 
-/** Footer one-liner: always visible, unlike a transient toast. */
-function footerStatus(config: ToolTreeConfig, nodes: number): string {
+/** One-line mode summary, printed by `/tool-tree status` and settings toasts. */
+function statusLine(config: ToolTreeConfig, nodes: number): string {
   return `tool-tree ${config.enabled ? "on" : "off"} · ${config.scope} · preview ${config.previewLines} · ${nodes} call${nodes === 1 ? "" : "s"}`;
 }
 
 export default function (pi: ExtensionAPI) {
   let config = loadToolTreeConfig();
-  const registry = new ToolTreeRegistry(config);
+  const registry = sharedRegistry(config);
   let requestRedraw: (() => void) | undefined;
   let patch: ToolTreePatchHandle | undefined;
   let assistantPatch: AssistantPatchHandle | undefined;
   let patchError: string | undefined;
   let spinnerTimer: ReturnType<typeof setInterval> | undefined;
-  let lastFooterCount = -1;
 
   const redraw = () => requestRedraw?.();
 
   registry.onTreeChange(redraw);
 
+  /** The renderers for one handled tool call; shared by the resolver and the
+   *  row-adoption path in the patch. */
+  const rowRenderers = (toolName: string): ToolRenderers => ({
+    renderShell: "self",
+    renderCall: (args, theme, ctx) => {
+      const node =
+        registry.node(ctx.toolCallId) ??
+        registry.startNode({ toolCallId: ctx.toolCallId, toolName, args });
+      node.args = args ?? node.args;
+      const group = registry.groupFor(node);
+      if (!group) return new EmptyComponent();
+      // Every row of a group returns the same tree view; Pi hides all but the
+      // group's first row, so the block renders exactly once.
+      return new TreeComponent({
+        registry,
+        group,
+        config,
+        theme,
+        piExpanded: ctx.expanded,
+        invalidate: ctx.invalidate,
+        now: () => Date.now(),
+      });
+    },
+    // The node renders its own output; Pi's second slot stays empty.
+    renderResult: () => new EmptyComponent(),
+  });
+
   pi.registerToolRenderer((toolName, next) => {
     if (!shouldHandleTool(toolName, config)) return next();
-    return {
-      renderShell: "self",
-      renderCall: (args, theme, ctx) => {
-        const node =
-          registry.node(ctx.toolCallId) ??
-          registry.startNode({ toolCallId: ctx.toolCallId, toolName, args });
-        node.args = args ?? node.args;
-        const group = registry.groupFor(node);
-        if (!group) return new EmptyComponent();
-        // Every row of a group returns the same tree view; Pi hides all but the
-        // group's first row, so the block renders exactly once.
-        return new TreeComponent({
-          registry,
-          group,
-          config,
-          theme,
-          piExpanded: ctx.expanded,
-          invalidate: ctx.invalidate,
-          now: () => Date.now(),
-        });
-      },
-      // The node renders its own output; Pi's second slot stays empty.
-      renderResult: () => new EmptyComponent(),
-    };
+    return rowRenderers(toolName);
   });
 
   const applyConfig = (next: ToolTreeConfig, ctx: ExtensionContext) => {
@@ -130,8 +152,7 @@ export default function (pi: ExtensionAPI) {
 
       if (!verb || verb === "status") {
         const nodes = registry.allNodes();
-        const text = footerStatus(config, nodes.length);
-        ctx.ui.setStatus("tool-tree", text);
+        const text = statusLine(config, nodes.length);
         const listing =
           nodes.length === 0
             ? "no tool calls yet"
@@ -256,7 +277,9 @@ export default function (pi: ExtensionAPI) {
     if (ctx.mode !== "tui") return;
 
     try {
-      patch = installToolTreePatch(registry);
+      patch = installToolTreePatch(registry, (toolName) =>
+        shouldHandleTool(toolName, config) ? rowRenderers(toolName) : undefined,
+      );
       assistantPatch = installAssistantThinkingPatch(registry);
     } catch (error) {
       patchError = error instanceof Error ? error.message : String(error);
@@ -264,8 +287,6 @@ export default function (pi: ExtensionAPI) {
     }
 
     registry.restoreFromEntries(ctx.sessionManager.getEntries());
-    // Persistent footer feedback so the current mode is always visible.
-    ctx.ui.setStatus("tool-tree", footerStatus(config, registry.allNodes().length));
 
     // Zero-row widget: captures Pi's live TUI so the tree can request a redraw
     // after a click without replacing any visible UI.
@@ -310,9 +331,16 @@ export default function (pi: ExtensionAPI) {
       .filter((block) => block.type === "thinking")
       .map((block) => (block.type === "thinking" ? block.thinking : ""))
       .join("\n\n");
-    if (!reasoning.trim()) return;
-    // Reasoning joins the same tree as this turn's tool calls.
-    registry.upsertThinking(event.message.timestamp, reasoning);
+    // Reasoning joins the same tree as this turn's tool calls, and must be
+    // registered first so the thought keeps its place before the calls.
+    if (reasoning.trim()) registry.upsertThinking(event.message.timestamp, reasoning);
+    // Pi creates one row per tool call while the message streams, so register
+    // the calls in content order: the tree then follows the order the model
+    // wrote them, and the first row always knows the whole group.
+    for (const block of event.message.content) {
+      if (block.type !== "toolCall" || !block.id || !block.name) continue;
+      registry.observeToolCall({ toolCallId: block.id, toolName: block.name, args: block.arguments });
+    }
     redraw();
   });
 
@@ -346,14 +374,9 @@ export default function (pi: ExtensionAPI) {
     redraw();
   });
 
-  pi.on("turn_end", (_event, ctx) => {
+  pi.on("turn_end", (_event, _ctx) => {
     registry.endTurn();
     redraw();
-    // Keep the footer count in step with the session without repainting per event.
-    const count = registry.allNodes().length;
-    if (ctx.mode !== "tui" || count === lastFooterCount) return;
-    lastFooterCount = count;
-    ctx.ui.setStatus("tool-tree", footerStatus(config, count));
   });
 
 
@@ -372,6 +395,7 @@ export default function (pi: ExtensionAPI) {
     assistantPatch = undefined;
     if (ctx.hasUI) {
       ctx.ui.setWidget(RENDER_BRIDGE_WIDGET, undefined);
+      // Clear a status line left behind by an older build.
       ctx.ui.setStatus("tool-tree", undefined);
     }
     requestRedraw = undefined;

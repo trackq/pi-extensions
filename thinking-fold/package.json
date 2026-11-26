@@ -34,6 +34,7 @@
   "files": [
     "*.ts",
     "model-behaviors.json",
+    "scripts",
     "README.md",
     "TESTING.md",
     "CHANGELOG.md",

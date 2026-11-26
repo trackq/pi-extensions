@@ -1,4 +1,4 @@
-import type { ToolTreeConfig } from "./config.ts";
+import { shouldHandleTool, type ToolTreeConfig } from "./config.ts";
 
 export type ToolNodeStatus = "running" | "ok" | "error";
 
@@ -90,8 +90,9 @@ export class ToolTreeRegistry {
     this.currentGroup = undefined;
     this.currentTurnMessages = [];
     this.claimedTurn = false;
-    this.claimedMessageTimestamps.clear();
     this.thinkingByMessage.clear();
+    // Deliberately keep `claimedMessageTimestamps`: older turns stay claimed, so
+    // their "Thought for …" line does not come back when Pi re-renders them.
   }
 
   /**
@@ -185,6 +186,13 @@ export class ToolTreeRegistry {
       this.currentGroup.endedAt = Date.now();
       if (this.config.collapseAfterTurn) this.currentGroup.collapsed = true;
     }
+    // A call that never reported an end (aborted turn, or a tool call that was
+    // only observed while streaming) must not keep a spinner alive forever.
+    for (const node of this.nodes.values()) {
+      if (node.status !== "running") continue;
+      node.status = "ok";
+      node.endedAt = node.endedAt ?? Date.now();
+    }
     this.currentGroup = undefined;
     this.bump();
   }
@@ -208,6 +216,22 @@ export class ToolTreeRegistry {
     group.expandedAll = false;
     this.bump();
     return true;
+  }
+
+  /**
+   * Record a tool call the model emitted, before it executes. Pi creates one
+   * component per tool call while the message streams, so registering them in
+   * content order keeps the tree in the order the model wrote the calls, and
+   * makes every call known before the first row renders.
+   */
+  observeToolCall(event: { toolCallId: string; toolName: string; args: unknown }): void {
+    const existing = this.nodes.get(event.toolCallId);
+    if (existing) {
+      existing.args = event.args;
+      this.bump();
+      return;
+    }
+    this.startNode(event);
   }
 
   startNode(event: { toolCallId: string; toolName: string; args: unknown; parentToolCallId?: string }): ToolNode {
@@ -288,9 +312,17 @@ export class ToolTreeRegistry {
           .join("\n\n");
         const ownToolCalls = message.content.filter((block) => (block as { type?: string }).type === "toolCall");
         if (ownToolCalls.length > 0) {
-          group = group ?? this.ensureGroup();
           this.claimedMessageTimestamps.add(messageTimestamp);
-          if (thinkingText.trim()) {
+          // A live turn that owns these calls (restore on /reload, session resume
+          // mid-turn) must keep its timing, ordering and expansion state.
+          const allKnown = ownToolCalls.every((call) => {
+            const id = (call as { id?: string }).id;
+            return Boolean(id) && this.nodes.has(id!);
+          });
+          if (allKnown) continue;
+
+          group = group ?? this.ensureGroup();
+          if (thinkingText.trim() && !this.nodes.has(`thinking-${messageTimestamp}`)) {
             const thinkingNode: ToolNode = {
               kind: "thinking",
               toolCallId: `thinking-${messageTimestamp}`,
@@ -308,8 +340,6 @@ export class ToolTreeRegistry {
             group.nodes.push(thinkingNode);
             this.groupOfNode.set(thinkingNode.toolCallId, group);
           }
-        }
-        if (ownToolCalls.length > 0) {
           const started = typeof message.timestamp === "number" ? message.timestamp : Date.now();
           const id = `${this.turnKey}:restored-${started}-${this.groups.size}`;
           group = this.groups.get(id) ?? { id, startedAt: started, nodes: [], expandedAll: false, collapsed: false };
@@ -319,6 +349,7 @@ export class ToolTreeRegistry {
           const call = block as { type?: string; id?: string; name?: string; arguments?: unknown };
           if (call.type !== "toolCall" || !call.id || !call.name) continue;
           if (!group) continue;
+          if (this.nodes.has(call.id)) continue;
           const node: ToolNode = {
             kind: "tool",
             toolCallId: call.id,
@@ -385,21 +416,48 @@ export class ToolTreeRegistry {
   /** Position of the node among its group's top-level nodes. */
   nodePosition(node: ToolNode): { index: number; isLast: boolean } {
     const group = this.groupFor(node);
-    const siblings = group ? group.nodes : [];
+    const siblings = group ? this.treeNodes(group) : [];
     const index = siblings.findIndex((candidate) => candidate.toolCallId === node.toolCallId);
     return { index, isLast: index === siblings.length - 1 };
   }
 
   /**
-   * True for the first node of a group that has a tool row of its own. Thinking
-   * nodes are rendered by that row too, so they never anchor the tree.
+   * True for nodes this tree draws itself. Tools that keep Pi's own renderer
+   * (read/write/edit/…) do not render in the tree, so their rows are never
+   * hidden and their diffs/previews stay intact.
+   */
+  rendersInTree(node: ToolNode): boolean {
+    if (node.kind === "thinking") return true;
+    return shouldHandleTool(node.toolName, this.config);
+  }
+
+  /** Top-level nodes the tree draws, in emission order. */
+  treeNodes(group: ToolGroup): ToolNode[] {
+    return group.nodes.filter((node) => this.rendersInTree(node));
+  }
+
+  /**
+   * True for the first node of a group that the tree draws itself. Rows for
+   * tools that keep Pi's renderer can never anchor the tree; otherwise a
+   * `read`/`edit` call at the start of a turn would swallow the whole block.
    */
   isGroupHead(node: ToolNode): boolean {
-    if (node.kind !== "tool") return false;
+    if (node.kind !== "tool" || !this.rendersInTree(node)) return false;
     const group = this.groupFor(node);
     if (!group) return false;
-    const firstTool = group.nodes.find((candidate) => candidate.kind === "tool");
+    const firstTool = group.nodes.find(
+      (candidate) => candidate.kind === "tool" && this.rendersInTree(candidate),
+    );
     return firstTool?.toolCallId === node.toolCallId;
+  }
+
+  /** True when the group has a tree-drawing node that can anchor the block. */
+  hasGroupHead(node: ToolNode): boolean {
+    const group = this.groupFor(node);
+    if (!group) return false;
+    return group.nodes.some(
+      (candidate) => candidate.kind === "tool" && this.rendersInTree(candidate),
+    );
   }
 
   groupSummary(group: ToolGroup): {
@@ -409,7 +467,9 @@ export class ToolTreeRegistry {
     running: number;
     durationMs?: number;
   } {
-    const nodes = group.nodes.filter((node) => node.kind === "tool");
+    const nodes = group.nodes.filter(
+      (node) => node.kind === "tool" && this.rendersInTree(node),
+    );
     const failed = nodes.filter((node) => node.status === "error").length;
     const running = nodes.filter((node) => node.status === "running").length;
     // Wall-clock span of the group (thoughts + tools), not a sum of tool times.
@@ -484,7 +544,14 @@ export class ToolTreeRegistry {
 
   /** Ctrl+O in Pi expands every tool row; mirror it on the whole group. */
   setGroupExpandedAll(group: ToolGroup, expanded: boolean): void {
-    const changed = group.expandedAll !== expanded || (expanded === false && group.nodes.some((node) => node.expanded));
+    // Expanding must also leave the collapsed summary state, otherwise the row
+    // shows a "▾" chevron with no nodes under it.
+    const wasCollapsed = group.collapsed;
+    if (expanded) group.collapsed = false;
+    const changed =
+      wasCollapsed !== group.collapsed ||
+      group.expandedAll !== expanded ||
+      (expanded === false && group.nodes.some((node) => node.expanded));
     if (!changed) return;
     group.expandedAll = expanded;
     if (!expanded) {

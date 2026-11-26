@@ -20,6 +20,13 @@ const TOOL_LABELS: Record<string, string> = {
   ctx_doctor: "doctor",
   ctx_upgrade: "upgrade",
   bash: "bash",
+  powershell: "ps",
+  read: "read",
+  write: "write",
+  edit: "edit",
+  grep: "grep",
+  find: "find",
+  ls: "ls",
   web_search: "web",
   fetch_content: "fetch",
 };
@@ -276,8 +283,11 @@ export class TreeComponent implements Component {
     };
 
     if (!group.collapsed) {
-      group.nodes.forEach((node, index) => {
-        renderNode(node, 0, index === group.nodes.length - 1);
+      // Only the calls this tree owns get a row here; tools that keep Pi's own
+      // renderer stay in the transcript as their own rows.
+      const visible = registry.treeNodes(group);
+      visible.forEach((node, index) => {
+        renderNode(node, 0, index === visible.length - 1);
       });
     }
 

@@ -10,11 +10,15 @@ cd tool-tree
 node --experimental-transform-types test/render-regressions.mjs
 ```
 
-Expect `35/35 checks passed` + `OK`. It renders real `ToolExecutionComponent`
+Expect `70/70 checks passed` + `OK`. It renders real `ToolExecutionComponent`
 instances and covers: tree shape and connectors, header counts (`N calls`,
-`1 failed`), error glyphs, single click (preview), double click (full output,
-then collapse), header click (collapse-then-expand), `Ctrl+O` parity, grouping
-scope, width safety at 60/100/160 columns, and the summariser table.
+`1 failed`), error glyphs, file tools folded in (`read`/`write`/`edit` with
+`+N lines` / `+added −removed`), single click (preview), double click (full
+output, then collapse), header click (collapse-then-expand), `Ctrl+O` parity
+(including after the turn collapsed), grouping scope, width safety at 60/100/160
+columns, native rows that must stay visible, adoption of rows Pi built itself
+(including a row whose start event never arrived), a disabled tree leaving every
+row alone, and the summariser table.
 
 Add a check here first for any bug you fix.
 
@@ -24,7 +28,7 @@ Restart Pi after changing the package (extensions load at startup).
 
 | # | Action | Expected |
 |---|---|---|
-| 1 | `/tool-tree status` | toast `tool-tree on · turn · preview 6 · N calls — 1.bash …` and the same line pinned in Pi's footer |
+| 1 | `/tool-tree status` | toast `tool-tree on · turn · preview 6 · N calls — 1.bash …`; nothing added to Pi's footer |
 | 2 | `Think first, then run pwd with bash and date with ctx_execute` | After the turn: **one summary line** `▸ tools · 2 calls · 1 thought · …`; no separate `Thought for …` lines; no coloured buckets |
 | 2b | `/tool-tree expand` | Reveals the block: `thought` nodes interleaved with tool nodes, in the order they happened |
 | 3 | `/tool-tree full 2` | Node #2 opens with `command/language/output` rows; header chevron becomes `▾` |
@@ -54,8 +58,12 @@ Restart Pi after changing the package (extensions load at startup).
   hand in a real terminal.
 - Nested codemode calls (`parentToolCallId`) render as deeper tree levels but
   are not yet exercised by a live prompt.
-- `read`/`edit`/`write`/`grep`/`glob` intentionally keep Pi's renderers; adding
-  them needs summaries for diffs.
+- Tools outside the handled set (e.g. `get_search_content`) intentionally keep
+  Pi's renderers; their rows render natively next to the tree.
+- Rows Pi already dropped cannot be adopted; nothing renders them, so nothing is
+  hidden.
+- A shell command you run yourself (`!cd …`, bash mode) is a
+  `BashExecutionComponent`, not a tool call: it never joins the tree.
 - Expansion is per session, in-memory; nothing persisted.
 
 ## 5. Files

@@ -1,6 +1,6 @@
 {
   "name": "pi-tool-tree",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Collapse per-turn thoughts and tool calls into one drill-down tree with one line per call",
   "type": "module",
   "pi": {

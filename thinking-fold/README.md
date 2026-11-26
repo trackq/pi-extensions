@@ -130,6 +130,35 @@ uninstalling.
 - If Pi's internal child layout changes, the affected message falls back to
   complete native rendering instead of leaking markers or corrupting content.
 
+- If Pi's internal child layout changes, the affected message falls back to
+  complete native rendering instead of leaking markers or corrupting content.
+
+## Cleaning up `pi-thinking-steps` leftovers
+
+`pi-thinking-steps` wrote one custom session entry per assistant message
+(`customType: "thinking-steps.rate-line"`, rendered as `in 1,030 tok/s · out
+246 tok/s`) and two `thinking-steps.mode` markers. Custom entries never enter
+the model context, and Pi only renders a custom entry while an extension
+registers a renderer for its type — so with the package removed the lines are
+invisible but the entries stay in old session files (hundreds of them in a
+long session).
+
+If you still see a stray rate line, a Pi process started while the package was
+installed is still running: restart Pi, and check `pi list` /
+`pi config` that `pi-thinking-steps` is really gone.
+
+To drop the leftover entries from the session files:
+
+```bash
+node scripts/strip-legacy-entries.mjs                     # dry run, prints what it would remove
+node scripts/strip-legacy-entries.mjs --apply             # rewrite, keeps <session>.jsonl.bak
+node scripts/strip-legacy-entries.mjs --apply --no-backup
+node scripts/strip-legacy-entries.mjs --dir <sessions dir>
+```
+
+It only removes lines whose entry type is `custom` and whose `customType`
+starts with `thinking-steps.`; every other line stays byte-identical.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Original work © 99percentpeople.
