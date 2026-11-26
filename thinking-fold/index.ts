@@ -1,0 +1,428 @@
+import type { AssistantMessage, AssistantMessageEvent } from "@earendil-works/pi-ai";
+import {
+  VERSION,
+  keyText,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import { getKeybindings } from "@earendil-works/pi-tui";
+import {
+  configToRenderOptions,
+  DEFAULT_THINKING_FOLD_CONFIG,
+  getThinkingFoldConfigPath,
+  loadThinkingFoldConfig,
+  saveThinkingFoldConfig,
+  type ThinkingFoldConfig,
+} from "./config.ts";
+import {
+  createThinkingCursorLabel,
+  DEFAULT_THINKING_CURSOR_LABEL,
+  installThinkingFoldPatch,
+  type ThinkingFoldPatchHandle,
+} from "./renderer.ts";
+
+const ITEM_TIMER_INTERVAL_MS = 1000;
+const MIN_SUMMARY_CURSOR_MS = 1000;
+const RENDER_BRIDGE_WIDGET = "thinking-fold-render-bridge";
+
+function loadDefaultConfig(): ThinkingFoldConfig {
+  return { ...DEFAULT_THINKING_FOLD_CONFIG };
+}
+
+function configSummary(config: ThinkingFoldConfig): string {
+  return [
+    `fold after ${config.foldThreshold} lines`,
+    `while thinking: ${config.streamingBehavior}`,
+    `after thinking: ${config.completedBehavior}`,
+  ].join(" · ");
+}
+
+export function endsThinkingPhase(type: AssistantMessageEvent["type"]): boolean {
+  return (
+    type === "thinking_end" ||
+    type === "text_start" ||
+    type === "text_delta" ||
+    type === "toolcall_start" ||
+    type === "toolcall_delta"
+  );
+}
+
+export function remainingSummaryCursorMs(
+  firstVisibleAt: number,
+  completedAt: number,
+  minimumMs = MIN_SUMMARY_CURSOR_MS,
+): number {
+  return Math.max(0, minimumMs - Math.max(0, completedAt - firstVisibleAt));
+}
+
+function restoreTimings(ctx: ExtensionContext, patch: ThinkingFoldPatchHandle): void {
+  for (const entry of ctx.sessionManager.getEntries()) {
+    if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+    const message = entry.message;
+    if (!message.content.some((block) => block.type === "thinking" && block.thinking.trim())) continue;
+
+    patch.trackMessage(message);
+    const completedAt = Date.parse(entry.timestamp);
+    const startedAt = Number.isFinite(message.timestamp) ? message.timestamp : completedAt;
+    patch.setMessageTiming(message.timestamp, {
+      startedAt: Math.min(startedAt, completedAt),
+      completedAt,
+    });
+  }
+}
+
+function lineValues(current: number): string[] {
+  return [...new Set([1, 3, 5, 8, 10, 15, 20, current])]
+    .sort((left, right) => left - right)
+    .map(String);
+}
+
+export default function (pi: ExtensionAPI) {
+  let config = loadThinkingFoldConfig();
+  let patch: ThinkingFoldPatchHandle | undefined;
+  let removeInputListener: (() => void) | undefined;
+  let requestRender: (() => void) | undefined;
+  let itemTimer: ReturnType<typeof setInterval> | undefined;
+  let summaryHoldTimer: ReturnType<typeof setTimeout> | undefined;
+  let thinkingStartedAt: number | undefined;
+  let lastItemTimerSecond = -1;
+  let lastWorkingMessage: string | undefined;
+  let summaryFirstVisibleAt: number | undefined;
+  let holdingSummaryCursor = false;
+  let currentAssistant: AssistantMessage | undefined;
+  let sawThinkingInCurrentMessage = false;
+  let thinkingCompleted = false;
+  let patchError: string | undefined;
+
+  try {
+    patch = installThinkingFoldPatch(configToRenderOptions(config));
+  } catch (error) {
+    patchError = error instanceof Error ? error.message : String(error);
+  }
+
+  const stopItemTimer = () => {
+    if (itemTimer) clearInterval(itemTimer);
+    itemTimer = undefined;
+  };
+
+  const renderThinkingCursor = (ctx: ExtensionContext, now = Date.now()) => {
+    if (
+      ctx.mode !== "tui" ||
+      thinkingStartedAt === undefined ||
+      (thinkingCompleted && !holdingSummaryCursor) ||
+      !currentAssistant ||
+      !patch
+    ) {
+      return;
+    }
+    const label = createThinkingCursorLabel(currentAssistant, patch.options.mode);
+    if (label === lastWorkingMessage) return;
+    lastWorkingMessage = label;
+    ctx.ui.setWorkingMessage(label);
+  };
+
+  const refreshItemTimer = (now = Date.now()) => {
+    if (!patch || thinkingStartedAt === undefined || thinkingCompleted) return;
+    const elapsedSecond = Math.floor(Math.max(0, now - thinkingStartedAt) / 1000);
+    if (elapsedSecond === lastItemTimerSecond) return;
+    lastItemTimerSecond = elapsedSecond;
+    patch.tick(now);
+    requestRender?.();
+  };
+
+  const startItemTimer = (ctx: ExtensionContext) => {
+    if (!patch || itemTimer || ctx.mode !== "tui") return;
+    const now = Date.now();
+    refreshItemTimer(now);
+    renderThinkingCursor(ctx, now);
+    itemTimer = setInterval(() => refreshItemTimer(), ITEM_TIMER_INTERVAL_MS);
+  };
+
+  const clearSummaryHold = () => {
+    if (summaryHoldTimer) clearTimeout(summaryHoldTimer);
+    summaryHoldTimer = undefined;
+    holdingSummaryCursor = false;
+  };
+
+  const showResponding = (ctx: ExtensionContext) => {
+    clearSummaryHold();
+    stopItemTimer();
+    lastWorkingMessage = "Responding...";
+    ctx.ui.setWorkingMessage(lastWorkingMessage);
+  };
+
+  const applyConfig = (next: ThinkingFoldConfig, ctx: ExtensionContext) => {
+    config = next;
+    patch?.updateOptions(configToRenderOptions(config));
+    requestRender?.();
+    try {
+      saveThinkingFoldConfig(config);
+    } catch (error) {
+      ctx.ui.notify(
+        `Failed to save thinking-fold settings: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+    }
+    if (sawThinkingInCurrentMessage) {
+      lastWorkingMessage = undefined;
+      renderThinkingCursor(ctx);
+    }
+  };
+
+  pi.registerCommand("thinking-fold", {
+    description: "Configure thinking folding (lines, while thinking, after thinking)",
+    getArgumentCompletions: (prefix) => {
+      const options = [
+        "status",
+        "toggle",
+        "reset",
+        ...lineValues(config.foldThreshold).map((value) => `lines ${value}`),
+        "while auto",
+        "while preview",
+        "while collapse",
+        "after auto",
+        "after collapse",
+        "after preview",
+        "after full",
+      ];
+      const trimmed = prefix.trim().toLowerCase();
+      return options
+        .filter((option) => option.startsWith(trimmed))
+        .map((option) => ({ value: option, label: option }));
+    },
+    handler: async (args, ctx) => {
+      const [verb, value] = args.trim().toLowerCase().split(/\s+/, 2);
+      const notifyConfig = () =>
+        ctx.ui.notify(`Thinking fold · ${configSummary(config)}\nSaved to ${getThinkingFoldConfigPath()}`, "info");
+
+      if (!verb || verb === "status") {
+        notifyConfig();
+        return;
+      }
+      if (verb === "toggle") {
+        patch?.toggle();
+        requestRender?.();
+        ctx.ui.notify(`Thinking blocks: ${patch?.expanded ? "expanded" : "folded"}`, "info");
+        return;
+      }
+      if (verb === "reset") {
+        applyConfig(loadDefaultConfig(), ctx);
+        notifyConfig();
+        return;
+      }
+      if (verb === "lines") {
+        const lines = Number(value);
+        if (!Number.isInteger(lines) || lines < 1 || lines > 20) {
+          ctx.ui.notify(`Thinking fold: lines must be an integer from 1 to 20`, "warning");
+          return;
+        }
+        applyConfig({ ...config, foldThreshold: lines }, ctx);
+        notifyConfig();
+        return;
+      }
+      if (verb === "while" && (value === "auto" || value === "preview" || value === "collapse")) {
+        applyConfig({ ...config, streamingBehavior: value }, ctx);
+        notifyConfig();
+        return;
+      }
+      if (
+        verb === "after" &&
+        (value === "auto" || value === "collapse" || value === "preview" || value === "full")
+      ) {
+        applyConfig({ ...config, completedBehavior: value }, ctx);
+        notifyConfig();
+        return;
+      }
+      ctx.ui.notify(
+        "Usage: /thinking-fold [status|toggle|reset|lines <1-20>|while <auto|preview|collapse>|after <auto|collapse|preview|full>]",
+        "warning",
+      );
+    },
+  });
+
+  pi.on("session_start", (_event, ctx) => {
+    if (patchError) {
+      if (ctx.hasUI) {
+        ctx.ui.notify(`thinking-fold disabled on Pi ${VERSION}: ${patchError}`, "warning");
+      }
+      return;
+    }
+    if (!patch || ctx.mode !== "tui") return;
+
+    // Terminal input consumed by an extension does not schedule a TUI render.
+    // Capture Pi's live TUI through a zero-row widget factory without replacing
+    // another extension's editor/footer or adding visible UI.
+    ctx.ui.setWidget(RENDER_BRIDGE_WIDGET, (tui) => {
+      requestRender = () => tui.requestRender();
+      return {
+        render: () => [],
+        invalidate() {},
+        dispose() { requestRender = undefined; },
+      };
+    }, { placement: "belowEditor" });
+
+    const toggleKey = keyText("app.thinking.toggle") || "ctrl+t";
+    patch.updateOptions({ ...configToRenderOptions(config), toggleKey });
+    restoreTimings(ctx, patch);
+
+    removeInputListener?.();
+    removeInputListener = ctx.ui.onTerminalInput((data) => {
+      if (!patch || !getKeybindings().matches(data, "app.thinking.toggle")) return;
+
+      patch.toggle();
+      requestRender?.();
+      return { consume: true };
+    });
+  });
+
+  pi.on("message_start", (event, ctx) => {
+    if (event.message.role !== "assistant" || ctx.mode !== "tui" || !patch) return;
+    currentAssistant = event.message;
+    patch.trackMessage(event.message);
+    sawThinkingInCurrentMessage = false;
+    thinkingCompleted = false;
+    clearSummaryHold();
+    summaryFirstVisibleAt = undefined;
+    thinkingStartedAt = Date.now();
+    lastItemTimerSecond = -1;
+    lastWorkingMessage = undefined;
+    patch.beginMessage(event.message, thinkingStartedAt);
+    renderThinkingCursor(ctx, thinkingStartedAt);
+  });
+
+  pi.on("message_update", (event, ctx) => {
+    if (event.message.role !== "assistant" || ctx.mode !== "tui" || !patch) return;
+    currentAssistant = event.message;
+    patch.trackMessage(event.message);
+
+    const hasThinking = event.message.content.some((block) => block.type === "thinking");
+    if (hasThinking) {
+      sawThinkingInCurrentMessage = true;
+      const now = Date.now();
+      const cursorLabel = createThinkingCursorLabel(event.message, patch.options.mode);
+      if (cursorLabel !== DEFAULT_THINKING_CURSOR_LABEL) summaryFirstVisibleAt ??= now;
+      startItemTimer(ctx);
+      renderThinkingCursor(ctx, now);
+    }
+
+    if (
+      sawThinkingInCurrentMessage &&
+      !thinkingCompleted &&
+      endsThinkingPhase(event.assistantMessageEvent.type)
+    ) {
+      // OpenAI-compatible providers such as DeepSeek may emit thinking_end only
+      // after the entire response stream. Freeze the duration as soon as actual
+      // text or a tool call begins, then ignore the provider's late event.
+      const completedAt = Date.now();
+      patch.completeMessage(event.message, completedAt);
+      thinkingCompleted = true;
+      stopItemTimer();
+      const cursorLabel = createThinkingCursorLabel(event.message, patch.options.mode);
+      const holdMs =
+        cursorLabel !== DEFAULT_THINKING_CURSOR_LABEL && summaryFirstVisibleAt !== undefined
+          ? remainingSummaryCursorMs(summaryFirstVisibleAt, completedAt)
+          : 0;
+      if (holdMs > 0) {
+        holdingSummaryCursor = true;
+        renderThinkingCursor(ctx, completedAt);
+        summaryHoldTimer = setTimeout(() => showResponding(ctx), holdMs);
+      } else {
+        showResponding(ctx);
+      }
+    }
+
+    if (
+      !sawThinkingInCurrentMessage &&
+      ctx.model?.reasoning &&
+      (event.assistantMessageEvent.type === "text_start" ||
+        event.assistantMessageEvent.type === "text_delta")
+    ) {
+      showResponding(ctx);
+    }
+  });
+
+  const clearStreamState = (ctx: ExtensionContext) => {
+    clearSummaryHold();
+    stopItemTimer();
+    thinkingStartedAt = undefined;
+    summaryFirstVisibleAt = undefined;
+    lastWorkingMessage = undefined;
+    if (ctx.mode !== "tui") return;
+    ctx.ui.setWorkingMessage();
+  };
+
+  pi.on("message_end", (event, ctx) => {
+    if (event.message.role !== "assistant") return;
+    patch?.trackMessage(event.message);
+    if (patch && sawThinkingInCurrentMessage && !thinkingCompleted) {
+      patch.completeMessage(event.message);
+    }
+    currentAssistant = undefined;
+    clearStreamState(ctx);
+  });
+
+  pi.on("agent_end", (_event, ctx) => {
+    if (patch && currentAssistant && sawThinkingInCurrentMessage && !thinkingCompleted) {
+      patch.completeMessage(currentAssistant);
+    }
+    currentAssistant = undefined;
+    clearStreamState(ctx);
+  });
+
+  pi.on("session_shutdown", (_event, ctx) => {
+    clearSummaryHold();
+    stopItemTimer();
+    removeInputListener?.();
+    removeInputListener = undefined;
+    if (ctx.hasUI) {
+      ctx.ui.setWorkingMessage();
+    }
+    patch?.dispose();
+    patch = undefined;
+    if (requestRender) {
+      requestRender();
+      ctx.ui.setWidget(RENDER_BRIDGE_WIDGET, undefined);
+    }
+    requestRender = undefined;
+  });
+}
+
+export {
+  BUILT_IN_MODEL_BEHAVIORS,
+  loadBuiltInModelBehaviors,
+  parseModelBehaviorConfig,
+  resolveConfiguredThinkingBehavior,
+  type ConfiguredThinkingBehavior,
+  type ModelBehaviorConfig,
+  type ModelBehaviorRule,
+  type ModelIdentity,
+} from "./model-behaviors.ts";
+export {
+  configToRenderOptions,
+  DEFAULT_THINKING_FOLD_CONFIG,
+  getAgentDir,
+  getThinkingFoldConfigPath,
+  loadThinkingFoldConfig,
+  normalizeThinkingFoldConfig,
+  saveThinkingFoldConfig,
+  type ThinkingFoldConfig,
+} from "./config.ts";
+export {
+  createThinkingCursorLabel,
+  createThinkingDisplayMessage,
+  DEFAULT_THINKING_CURSOR_LABEL,
+  DEFAULT_THINKING_FOLD_OPTIONS,
+  extractLatestSummaryHeadline,
+  formatStreamingThinkingSeconds,
+  formatThinkingSeconds,
+  installThinkingFoldPatch,
+  resolveThinkingBehavior,
+  resolveThinkingDisplayBehavior,
+  type ThinkingCompletedBehavior,
+  type ThinkingDisplayState,
+  type ThinkingFoldMode,
+  type ThinkingFoldOptions,
+  type ThinkingStreamingBehavior,
+  type ThinkingFoldPatchHandle,
+  type ThinkingTiming,
+} from "./renderer.ts";

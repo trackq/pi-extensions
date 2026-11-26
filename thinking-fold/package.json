@@ -1,0 +1,50 @@
+{
+  "name": "pi-thinking-fold-deepseek",
+  "version": "0.2.0",
+  "description": "Fold streaming reasoning into a live tail preview and expand it with Pi's thinking shortcut, with explicit DeepSeek and multi-runner support",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "coding-agent",
+    "thinking",
+    "reasoning",
+    "deepseek",
+    "tui"
+  ],
+  "license": "MIT",
+  "author": "Kaweh Ebrahimi-Far",
+  "contributors": [
+    "Zach Yuen (original pi-thinking-fold)"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/trackq/pi-extensions.git",
+    "directory": "thinking-fold"
+  },
+  "homepage": "https://github.com/trackq/pi-extensions/tree/main/thinking-fold",
+  "bugs": {
+    "url": "https://github.com/trackq/pi-extensions/issues"
+  },
+  "files": [
+    "*.ts",
+    "model-behaviors.json",
+    "README.md",
+    "TESTING.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --experimental-transform-types test/render-regressions.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}

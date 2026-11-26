@@ -1,0 +1,45 @@
+{
+  "name": "pi-tool-tree",
+  "version": "0.1.0",
+  "description": "Collapse per-turn thoughts and tool calls into one drill-down tree with one line per call",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "coding-agent",
+    "tools",
+    "tui",
+    "tree"
+  ],
+  "license": "MIT",
+  "author": "Kaweh Ebrahimi-Far",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/trackq/pi-extensions.git",
+    "directory": "tool-tree"
+  },
+  "homepage": "https://github.com/trackq/pi-extensions/tree/main/tool-tree",
+  "bugs": {
+    "url": "https://github.com/trackq/pi-extensions/issues"
+  },
+  "files": [
+    "*.ts",
+    "README.md",
+    "TESTING.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --experimental-transform-types test/render-regressions.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}

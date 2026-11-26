@@ -1,0 +1,47 @@
+{
+  "name": "trackq-pi-extensions",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Pi harness by trackq: extensions that reshape how a turn is drawn in the TUI",
+  "type": "module",
+  "workspaces": [
+    "tool-tree",
+    "thinking-fold"
+  ],
+  "pi": {
+    "extensions": [
+      "./tool-tree/index.ts",
+      "./thinking-fold/index.ts"
+    ]
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "coding-agent",
+    "tui",
+    "tool-tree",
+    "thinking-fold"
+  ],
+  "license": "MIT",
+  "author": "Kaweh Ebrahimi-Far",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/trackq/pi-extensions.git"
+  },
+  "homepage": "https://github.com/trackq/pi-extensions#readme",
+  "bugs": {
+    "url": "https://github.com/trackq/pi-extensions/issues"
+  },
+  "scripts": {
+    "test": "npm run test --workspaces --if-present",
+    "test:tool-tree": "npm run test -w pi-tool-tree",
+    "test:thinking-fold": "npm run test -w pi-thinking-fold-deepseek",
+    "publish:tool-tree": "npm publish -w pi-tool-tree --access public",
+    "publish:thinking-fold": "npm publish -w pi-thinking-fold-deepseek --access public"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
